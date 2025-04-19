@@ -9,12 +9,14 @@ const setup = @import("setup.zig");
 const game = @import("game.zig");
 const move = @import("move.zig");
 const move_generator = @import("move_generator.zig");
+const search = @import("search.zig");
 
 const Game = game.Game;
 const Move = move.Move;
 const MoveRequest = move.MoveRequest;
 
 var gm: *game.Game = undefined;
+var searcher: *search.Searcher = undefined;
 
 fn on_request(r: zap.Request) anyerror!void {
     // /move make a move on the board
@@ -50,12 +52,25 @@ fn on_request(r: zap.Request) anyerror!void {
                 };
                 std.debug.print("Move played: {} {s}\n", .{ mv, new_fen });
 
+                const score = searcher.search(&local_gm, 5);
+                const best_move = searcher.best_move;
+
+                local_gm.playMove(best_move);
+                const computer_fen = local_gm.toFen() catch |err| {
+                    std.debug.print("Error converting to FEN: {}\n", .{err});
+                    return err;
+                };
+                std.debug.print("Computer move played: {} => {} {s}\n", .{ best_move, score, computer_fen });
+
                 var jsonbuf: [1024]u8 = undefined;
                 const res_json = try zap.util.stringifyBuf(&jsonbuf, .{
                     .fen = new_fen,
                     .in_check = local_gm.isCheck(),
                     .in_checkmate = local_gm.isCheckmate(),
                     .in_stalemate = local_gm.isStalemate(),
+                    .computer_score = score,
+                    .computer_move = best_move,
+                    .computer_fen = computer_fen,
                 }, .{});
                 try r.sendJson(res_json);
             }
@@ -69,6 +84,7 @@ pub fn main() !void {
     const allocator = std.heap.page_allocator;
     gm = try allocator.create(Game);
     gm.* = game.standard();
+    searcher = try allocator.create(search.Searcher);
 
     var listener = zap.HttpListener.init(.{
         .port = 3000,

@@ -22,6 +22,10 @@ pub const Color = enum(u1) {
             .Black => 'b',
         };
     }
+
+    pub fn clone(self: Color) Color {
+        return self;
+    }
 };
 
 pub fn fromChar(c: u8) ?Color {

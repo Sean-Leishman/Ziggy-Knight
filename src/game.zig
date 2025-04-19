@@ -6,6 +6,7 @@ const bitboard = @import("bitboard.zig");
 const square = @import("square.zig");
 const piece = @import("piece.zig");
 const move_generator = @import("move_generator.zig");
+const zobrist = @import("zobrist.zig");
 
 const Board = board.Board;
 const Color = color.Color;
@@ -26,6 +27,7 @@ pub const Game = struct {
 
     checkers: Bitboard = Bitboard{ .bits = 0 },
     legalMoves: MoveList = MoveList{},
+    hash: u64 = 0,
 
     pub fn us(self: Game) Bitboard {
         return self.board.ofColor(self.color);
@@ -43,6 +45,10 @@ pub const Game = struct {
         return self.them().bitAnd(self.board.ofPieceType(piece_type));
     }
 
+    pub fn ourColor(self: Game) Color {
+        return self.color;
+    }
+
     pub fn theirColor(self: Game) Color {
         return self.color.invert();
     }
@@ -57,6 +63,10 @@ pub const Game = struct {
 
     pub fn isStalemate(self: Game) bool {
         return !self.isCheck() and self.legalMoves.isEmpty();
+    }
+
+    pub fn isGameOver(self: Game) bool {
+        return self.isCheckmate() or self.isStalemate();
     }
 
     pub fn playCheckMove(self: *Game, mv: Move) !void {
@@ -88,6 +98,8 @@ pub const Game = struct {
     }
 
     pub fn playMove(self: *Game, mv: Move) void {
+        self.en_passant = null;
+
         const back = bitboard.relativeRank(self.color, 0);
         const king_side = (mv.from.toBitboard().bitAnd(bitboard.kingside)).isNotEmpty();
         const back_side = back.bitAnd(if (king_side) bitboard.kingside else bitboard.queenside);
@@ -101,8 +113,10 @@ pub const Game = struct {
         }
         if (mv.special and mv.mover == PieceType.Pawn) { // separating these as if statements improves performance
             if (mv.result == PieceType.Pawn) {
+                // en passant capture
                 self.board.removeOn(Square{ .file = mv.to.file, .rank = mv.from.rank });
             } else if (mv.result == PieceType.Empty) {
+                // en passant available
                 self.en_passant = Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.from.file };
             }
         }
@@ -110,9 +124,56 @@ pub const Game = struct {
         self.castles.clearBit(mv.to); // if we ever move to a castles square, clear it permanently
         self.board.removeOn(mv.from); // no matter what, we move away from a square and to a square
         self.board.setPieceOn(Piece{ .piece_type = mv.mover, .color = self.color }, mv.to);
+
         self.halfmove_clock = if (mv.resetsHalfMoveClock()) 0 else self.halfmove_clock + 1;
         self.fullmove_number += self.color.wlbr(u10, 0, 1);
+
         self.color = self.color.invert();
+        self.checkers = self.board.checkers(self.color); // calculate new checkers for new player
+        self.legalMoves = move_generator.legalMoves(self.*) catch MoveList{};
+    }
+
+    pub fn undoMove(self: *Game, mv: Move) void {
+        self.color = self.color.invert();
+
+        if (mv.mover == PieceType.King) {
+            self.castles.setBits(mv.from.toBitboard().bitAnd(bitboard.corners)); // set the castle bits
+            self.castles.setBits(mv.to.toBitboard().bitAnd(bitboard.corners)); // for castling rights on corner
+            if (mv.special) {
+                self.board.removeOn(mv.to); // removes the king
+                const back = bitboard.relativeRank(self.color, 0);
+                const back_side = back.bitAnd(if (mv.from.file > mv.to.file) bitboard.kingside else bitboard.queenside);
+                const rook = back_side.bitAnd(bitboard.rook_castle).toSquare().?;
+                self.board.removeOn(rook); // removes the rook
+                self.board.setPieceOn(Piece{ .piece_type = PieceType.King, .color = self.color }, mv.from);
+
+                const dest_rook_square = back_side.bitAnd(bitboard.corners).toSquare().?; // place rook on the corner
+                self.board.setPieceOn(Piece{ .piece_type = PieceType.Rook, .color = self.color }, dest_rook_square);
+            }
+        }
+        if (mv.special and mv.mover == PieceType.Pawn) { // separating these as if statements improves performance
+            if (mv.result == PieceType.Pawn) {
+                self.en_passant = Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.to.file };
+                self.board.setPieceOn(Piece{ .piece_type = PieceType.Pawn, .color = self.color.invert() }, Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.to.file }); // place the captured pawn back on the square
+            } else if (mv.result == PieceType.Empty) {
+                self.en_passant = null;
+            }
+        }
+
+        // if we undo move to a castle square, we need to set the castle bit
+        const relative_rank: u8 = if (self.color == Color.White) 0 else 7;
+        if (relative_rank == mv.to.rank and (mv.to.file == 0 or mv.to.file == 7)) {
+            self.castles.setBit((Square{ .file = mv.to.file, .rank = mv.to.rank }));
+        }
+
+        self.board.removeOn(mv.to); // remove the piece from the destination square
+        self.board.setPieceOn(Piece{ .piece_type = mv.mover, .color = self.color }, mv.from); // place the piece back on the source square
+        if (mv.result != PieceType.Empty and !mv.special) { // if the move was a capture, we need to place the captured piece back on the board
+            self.board.setPieceOn(Piece{ .piece_type = mv.result, .color = self.color.invert() }, mv.to);
+        }
+        // self.halfmove_clock = if (mv.resetsHalfMoveClock()) 0 else self.halfmove_clock - 1;
+        self.fullmove_number -= self.color.wlbr(u10, 0, 1);
+
         self.checkers = self.board.checkers(self.color); // calculate new checkers for new player
         self.legalMoves = move_generator.legalMoves(self.*) catch MoveList{};
     }
@@ -145,8 +206,7 @@ pub const Game = struct {
 
         try fen.append(' ');
         if (self.en_passant) |ep| {
-            std.debug.print("en_passant: {}\n", .{ep});
-            try fen.append('-');
+            try fen.appendSlice(&ep.toString());
         } else {
             try fen.append('-');
         }
@@ -213,11 +273,11 @@ pub const Game = struct {
         return gme;
     }
 
-    pub fn clone(self: Game) Game {
-        return Game{
-            .board = self.board,
-            .color = self.color,
-            .castles = self.castles,
+    pub fn clone(self: Game) *Game {
+        return &Game{
+            .board = self.board.clone(),
+            .color = self.color.clone(),
+            .castles = self.castles.clone(),
             .en_passant = self.en_passant,
             .halfmove_clock = self.halfmove_clock,
             .fullmove_number = self.fullmove_number,

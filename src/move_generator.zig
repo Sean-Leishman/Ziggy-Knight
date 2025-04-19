@@ -17,7 +17,6 @@ const Move = move.Move;
 pub fn legalMoves(gme: Game) !MoveList {
     var moves = MoveList{};
     const king_square = gme.our(PieceType.King).toSquare().?;
-    std.debug.print("InCheck: {} {}\n", .{ gme.isCheck(), gme.checkers });
 
     if (!gme.isCheck()) {
         const not_us = gme.us().invert();
@@ -194,8 +193,8 @@ fn evasions(moves: *MoveList, gme: Game) callconv(.Inline) !void {
 
 /// Convienience function the code a bit cleaner for move pushing
 pub fn pushPawnPromotions(moves: *MoveList, from: Square, to: Square, result: PieceType) callconv(.Inline) !void {
+    try moves.push(Move.new(from, to, true, PieceType.Queen, result));
+    try moves.push(Move.new(from, to, true, PieceType.Rook, result));
     try moves.push(Move.new(from, to, true, PieceType.Knight, result));
     try moves.push(Move.new(from, to, true, PieceType.Bishop, result));
-    try moves.push(Move.new(from, to, true, PieceType.Rook, result));
-    try moves.push(Move.new(from, to, true, PieceType.Queen, result));
 }

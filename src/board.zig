@@ -133,7 +133,7 @@ pub const Board = struct {
         var file: usize = 0;
         var rank: usize = 7;
 
-        std.debug.print("{s}", .{fen});
+        std.debug.print("Board.FromFen: {s}\n", .{fen});
         for (fen) |c| {
             switch (c) {
                 '1' => file += 1,
@@ -241,6 +241,20 @@ pub const Board = struct {
         }
 
         return result;
+    }
+
+    pub fn clone(self: Board) Board {
+        return Board{
+            .empty = self.empty.clone(),
+            .pawns = self.pawns.clone(),
+            .knights = self.knights.clone(),
+            .bishops = self.bishops.clone(),
+            .rooks = self.rooks.clone(),
+            .queens = self.queens.clone(),
+            .kings = self.kings.clone(),
+            .white = self.white.clone(),
+            .black = self.black.clone(),
+        };
     }
 };
 

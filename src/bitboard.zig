@@ -8,6 +8,10 @@ const Square = square.Square;
 pub const Bitboard = packed struct {
     bits: u64,
 
+    pub fn clone(self: Bitboard) Bitboard {
+        return Bitboard{ .bits = self.bits };
+    }
+
     pub fn debug(self: Bitboard) void {
         std.debug.print("Bitboard: {:#x}\n", .{self.bits});
     }
@@ -76,6 +80,10 @@ pub const Bitboard = packed struct {
         return if (self.isNotEmpty()) square.fromIndex(@intCast(@ctz(self.bits))) else null;
     }
 
+    pub fn lsb(self: Bitboard) i32 {
+        return @intCast(@ctz(self.bits));
+    }
+
     pub fn toSquare(self: Bitboard) ?Square {
         return if (self.isOneSquare()) self.first() else null;
     }
@@ -129,6 +137,10 @@ pub const Bitboard = packed struct {
 
     pub fn setBits(self: *Bitboard, bits: Bitboard) void {
         self.bits |= bits.bits;
+    }
+
+    pub fn shiftRight(self: Bitboard, shift: u6) Bitboard {
+        return Bitboard{ .bits = (self.bits >> shift) };
     }
 
     pub fn next(self: *Bitboard) ?Square {
@@ -187,4 +199,8 @@ pub fn relativeRank(clr: Color, r: u8) Bitboard {
         Color.White => r,
         Color.Black => 7 - r,
     });
+}
+
+pub inline fn file_plain(sq: usize) usize {
+    return sq & 0b111;
 }
