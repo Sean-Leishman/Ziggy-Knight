@@ -33,7 +33,8 @@ fn on_request(r: zap.Request) anyerror!void {
 
                 std.debug.print("Parsed JSON: {}\n", .{json.value});
 
-                var local_gm: Game = Game.fromFen(json.value.fen) catch gm.*;
+                var local_gm = game.empty();
+                try local_gm.setFen(json.value.fen);
 
                 const mv = Move.fromRequest(json.value) catch |err| {
                     std.debug.print("Error parsing move request: {}\n", .{err});

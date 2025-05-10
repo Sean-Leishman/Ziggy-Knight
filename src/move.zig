@@ -35,6 +35,14 @@ pub const Move = packed struct {
     pub fn resetsHalfMoveClock(self: Move) bool {
         return ((self.special) or (self.mover == PieceType.Pawn) or (self.result != PieceType.Empty));
     }
+
+    pub fn isPromotion(self: Move) bool {
+        return self.special and (self.mover == PieceType.Pawn) and (self.from.rank == 6) and (self.to.rank == 7);
+    }
+
+    pub fn getMvvLvaScore(self: Move) u8 {
+        return self.result.victimScore() * 60 - self.mover.victimScore() / 100;
+    }
 };
 
 pub const MoveList = struct {

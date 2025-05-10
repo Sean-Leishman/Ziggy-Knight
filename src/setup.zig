@@ -1,5 +1,6 @@
 const bitboard = @import("bitboard.zig");
 const square = @import("square.zig");
+const zobrist = @import("zobrist.zig");
 
 const Bitboard = bitboard.Bitboard;
 const Square = square.Square;
@@ -21,6 +22,8 @@ pub fn init() void {
     king_attacks = basicAttack(&king_offsets);
     rook_bishop_attacks = slidingAttack(&bishop_offsets, &rook_offsets);
     rook_bishop_rays = rays(&bishop_offsets, &rook_offsets);
+
+    zobrist.init_zobrist();
 }
 
 // single-square movement offsets of pieces

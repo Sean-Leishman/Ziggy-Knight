@@ -37,11 +37,40 @@ pub const PieceType = enum(u3) {
             PieceType.Other => '#',
         };
     }
+
+    pub fn victimScore(self: PieceType) i32 {
+        return switch (self) {
+            PieceType.Pawn => 1,
+            PieceType.Rook => 5,
+            PieceType.Knight => 3,
+            PieceType.Bishop => 3,
+            PieceType.Queen => 9,
+            PieceType.King => 0,
+            PieceType.Empty => 0,
+            PieceType.Other => 0,
+        };
+    }
 };
 
 pub const Piece = packed struct {
     color: Color,
     piece_type: PieceType,
+
+    pub fn index(self: Piece) u8 {
+        const piece_index: u8 = switch (self.piece_type) {
+            PieceType.Pawn => 0,
+            PieceType.Rook => 1,
+            PieceType.Knight => 2,
+            PieceType.Bishop => 3,
+            PieceType.Queen => 4,
+            PieceType.King => 5,
+            PieceType.Empty => unreachable,
+            PieceType.Other => unreachable,
+        };
+        const color_index: u8 = if (self.color == Color.White) 0 else 1;
+
+        return piece_index + color_index * 6;
+    }
 
     pub fn isEmpty(self: Piece) bool {
         return self.piece_type == PieceType.Empty;
@@ -64,6 +93,19 @@ pub const Piece = packed struct {
             PieceType.King => 'K' + offset,
             PieceType.Empty => '%',
             PieceType.Other => '#',
+        };
+    }
+
+    pub fn victimScore(self: Piece) i32 {
+        return switch (self.piece_type) {
+            PieceType.Pawn => 1,
+            PieceType.Rook => 5,
+            PieceType.Knight => 3,
+            PieceType.Bishop => 3,
+            PieceType.Queen => 9,
+            PieceType.King => 0,
+            PieceType.Empty => 0,
+            PieceType.Other => 0,
         };
     }
 };

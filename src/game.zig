@@ -100,30 +100,33 @@ pub const Game = struct {
     pub fn playMove(self: *Game, mv: Move) void {
         self.en_passant = null;
 
+        self.hash ^= zobrist.TurnHash;
+
         const back = bitboard.relativeRank(self.color, 0);
         const king_side = (mv.from.toBitboard().bitAnd(bitboard.kingside)).isNotEmpty();
         const back_side = back.bitAnd(if (king_side) bitboard.kingside else bitboard.queenside);
         if (mv.mover == PieceType.King) {
             self.castles = self.castles.bitAnd(back.invert());
             if (mv.special) {
-                self.board.removeOn(back_side.bitAnd(bitboard.corners).toSquare().?);
+                self.removePiece(back_side.bitAnd(bitboard.corners).toSquare().?);
                 const rook = back_side.bitAnd(bitboard.rook_castle).toSquare().?;
-                self.board.setPieceOn(Piece{ .piece_type = PieceType.Rook, .color = self.color }, rook);
+                self.addPiece(Piece{ .piece_type = PieceType.Rook, .color = self.color }, rook);
             }
         }
         if (mv.special and mv.mover == PieceType.Pawn) { // separating these as if statements improves performance
             if (mv.result == PieceType.Pawn) {
                 // en passant capture
-                self.board.removeOn(Square{ .file = mv.to.file, .rank = mv.from.rank });
+                self.removePiece(Square{ .file = mv.to.file, .rank = mv.from.rank });
             } else if (mv.result == PieceType.Empty) {
                 // en passant available
                 self.en_passant = Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.from.file };
+                self.hash ^= zobrist.EnPassantHash[self.en_passant.?.file];
             }
         }
         self.castles.clearBit(mv.from);
         self.castles.clearBit(mv.to); // if we ever move to a castles square, clear it permanently
-        self.board.removeOn(mv.from); // no matter what, we move away from a square and to a square
-        self.board.setPieceOn(Piece{ .piece_type = mv.mover, .color = self.color }, mv.to);
+        self.removePiece(mv.from);
+        self.addPiece(Piece{ .piece_type = mv.mover, .color = self.color }, mv.to);
 
         self.halfmove_clock = if (mv.resetsHalfMoveClock()) 0 else self.halfmove_clock + 1;
         self.fullmove_number += self.color.wlbr(u10, 0, 1);
@@ -131,6 +134,17 @@ pub const Game = struct {
         self.color = self.color.invert();
         self.checkers = self.board.checkers(self.color); // calculate new checkers for new player
         self.legalMoves = move_generator.legalMoves(self.*) catch MoveList{};
+    }
+
+    fn addPiece(self: *Game, pce: Piece, sq: Square) void {
+        self.board.setPieceOn(pce, sq);
+        self.hash ^= zobrist.ZobristTable[pce.index()][sq.index()];
+    }
+
+    fn removePiece(self: *Game, sq: Square) void {
+        const pc = self.board.pieceOn(sq) catch unreachable;
+        self.hash ^= zobrist.ZobristTable[pc.?.index()][sq.index()];
+        self.board.removeOn(sq);
     }
 
     pub fn undoMove(self: *Game, mv: Move) void {
@@ -218,11 +232,42 @@ pub const Game = struct {
         return fen.toOwnedSlice();
     }
 
-    pub fn fromFen(fen: []const u8) !Game {
+    pub fn setFen(self: *Game, fen: []const u8) !void {
         var it = std.mem.splitAny(u8, fen, " ");
-
         const board_fen = it.next() orelse return error.InvalidFen;
-        const brd = Board.fromFen(board_fen) catch return error.InvalidFen;
+
+        var file: usize = 0;
+        var rank: usize = 7;
+
+        std.debug.print("Board.FromFen: {s}\n", .{board_fen});
+        for (board_fen) |c| {
+            switch (c) {
+                '1' => file += 1,
+                '2' => file += 2,
+                '3' => file += 3,
+                '4' => file += 4,
+                '5' => file += 5,
+                '6' => file += 6,
+                '7' => file += 7,
+                '8' => file += 8,
+                '/' => {},
+                else => {
+                    const pc = try Piece.fromChar(c);
+                    std.debug.print("Setting Board.FromFen {}: {} {} {}\n", .{ c, pc, file, rank });
+                    self.addPiece(pc, Square{ .file = @intCast(file), .rank = @intCast(rank) });
+                    file += 1;
+                },
+            }
+
+            if (file == 8) {
+                file = 0;
+                if (rank == 0) {
+                    break;
+                }
+
+                rank -= 1;
+            }
+        }
 
         const color_fen = it.next() orelse return error.InvalidFen;
         if (color_fen.len != 1) {
@@ -234,6 +279,10 @@ pub const Game = struct {
             'b' => Color.Black,
             else => return error.InvalidFen,
         };
+
+        if (clr == Color.Black) {
+            self.hash ^= zobrist.TurnHash;
+        }
 
         const castles_fen = it.next() orelse return error.InvalidFen;
         var castles = bitboard.empty;
@@ -252,6 +301,7 @@ pub const Game = struct {
         var en_passant: ?Square = null;
         if (en_passant_fen.len == 2) {
             en_passant = Square.fromString(en_passant_fen) catch return error.InvalidFen;
+            self.hash ^= zobrist.EnPassantHash[en_passant.?.file];
         }
 
         const halfmove_clock_fen = it.next() orelse return error.InvalidFen;
@@ -260,21 +310,15 @@ pub const Game = struct {
         const fullmove_number_fen = it.next() orelse return error.InvalidFen;
         const fullmove_number = std.fmt.parseInt(u8, fullmove_number_fen, 10) catch return error.InvalidFen;
 
-        var gme = Game{
-            .board = brd,
-            .color = clr,
-            .castles = castles,
-            .en_passant = en_passant,
-            .halfmove_clock = halfmove_clock,
-            .fullmove_number = fullmove_number,
-        };
-
-        gme.checkers = gme.board.checkers(gme.color);
-        return gme;
+        self.checkers = self.board.checkers(self.color);
+        self.halfmove_clock = halfmove_clock;
+        self.fullmove_number = fullmove_number;
+        self.color = clr;
+        self.en_passant = en_passant;
     }
 
-    pub fn clone(self: Game) *Game {
-        return &Game{
+    pub fn clone(self: Game) Game {
+        return Game{
             .board = self.board.clone(),
             .color = self.color.clone(),
             .castles = self.castles.clone(),
@@ -290,6 +334,17 @@ pub fn standard() Game {
         .board = board.standard(),
         .color = Color.White,
         .castles = bitboard.corners,
+        .en_passant = null,
+        .halfmove_clock = 0,
+        .fullmove_number = 1,
+    };
+}
+
+pub fn empty() Game {
+    return Game{
+        .board = board.empty(),
+        .color = Color.White,
+        .castles = bitboard.empty,
         .en_passant = null,
         .halfmove_clock = 0,
         .fullmove_number = 1,
