@@ -310,6 +310,7 @@ pub const Game = struct {
         const fullmove_number_fen = it.next() orelse return error.InvalidFen;
         const fullmove_number = std.fmt.parseInt(u8, fullmove_number_fen, 10) catch return error.InvalidFen;
 
+        self.castles = castles;
         self.checkers = self.board.checkers(self.color);
         self.halfmove_clock = halfmove_clock;
         self.fullmove_number = fullmove_number;

@@ -40,7 +40,7 @@ fn on_request(r: zap.Request) anyerror!void {
                     std.debug.print("Error parsing move request: {}\n", .{err});
                     return err;
                 };
-                std.debug.print("Parsed move: {}\n", .{mv});
+                std.debug.print("Parsed move: {}\n\t{!s}\n", .{ mv, local_gm.toFen() });
 
                 local_gm.playCheckMove(mv) catch |err| {
                     std.debug.print("Error playing move: {}\n", .{err});
