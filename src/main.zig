@@ -18,6 +18,8 @@ const MoveRequest = move.MoveRequest;
 var gm: *game.Game = undefined;
 var searcher: *search.Searcher = undefined;
 
+var move_history: std.ArrayList([]const u8) = undefined;
+
 fn on_request(r: zap.Request) anyerror!void {
     // /move make a move on the board
     if (r.path) |the_path| {
@@ -40,30 +42,41 @@ fn on_request(r: zap.Request) anyerror!void {
                     std.debug.print("Error parsing move request: {}\n", .{err});
                     return err;
                 };
-                std.debug.print("Parsed move: {}\n\t{!s}\n", .{ mv, local_gm.toFen() });
+                std.debug.print("Retrieved user move: {}\n\t{!s}\n", .{ mv, local_gm.toFen() });
 
-                local_gm.playCheckMove(mv) catch |err| {
+                _ = local_gm.playCheckMove(mv) catch |err| {
                     std.debug.print("Error playing move: {}\n", .{err});
                     return err;
                 };
 
+                move_history.append(mv.toString() catch "") catch |err| {
+                    std.debug.print("Error appending move to history: {}\n", .{err});
+                    return err;
+                };
                 const new_fen = local_gm.toFen() catch |err| {
                     std.debug.print("Error converting to FEN: {}\n", .{err});
                     return err;
                 };
-                std.debug.print("Move played: {} {s}\n", .{ mv, new_fen });
+                std.debug.print("After user move played: {} {s}\n", .{ mv, new_fen });
 
+                searcher.toString();
                 const score = searcher.search(&local_gm, 5);
                 const best_move = searcher.best_move;
 
-                local_gm.playMove(best_move);
+                _ = local_gm.playMove(best_move);
                 const computer_fen = local_gm.toFen() catch |err| {
                     std.debug.print("Error converting to FEN: {}\n", .{err});
                     return err;
                 };
-                std.debug.print("Computer move played: {} => {} {s}\n", .{ best_move, score, computer_fen });
+                std.debug.print("After computer move played: {} => {} {s}\n", .{ best_move, score, computer_fen });
+                searcher.toString();
 
-                var jsonbuf: [1024]u8 = undefined;
+                move_history.append(best_move.toString() catch "") catch |err| {
+                    std.debug.print("Error appending computer move to history: {}\n", .{err});
+                    return err;
+                };
+
+                var jsonbuf: [2048]u8 = undefined;
                 const res_json = try zap.util.stringifyBuf(&jsonbuf, .{
                     .fen = new_fen,
                     .in_check = local_gm.isCheck(),
@@ -72,6 +85,7 @@ fn on_request(r: zap.Request) anyerror!void {
                     .computer_score = score,
                     .computer_move = best_move,
                     .computer_fen = computer_fen,
+                    .move_history = move_history.items,
                 }, .{});
                 try r.sendJson(res_json);
             }
@@ -86,6 +100,9 @@ pub fn main() !void {
     gm = try allocator.create(Game);
     gm.* = game.standard();
     searcher = try allocator.create(search.Searcher);
+    searcher.* = search.Searcher{};
+    move_history = std.ArrayList([]const u8).init(allocator);
+    defer move_history.deinit();
 
     var listener = zap.HttpListener.init(.{
         .port = 3000,

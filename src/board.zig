@@ -23,6 +23,18 @@ pub const Board = struct {
     white: Bitboard,
     black: Bitboard,
 
+    pub fn equals(self: Board, other: Board) bool {
+        return self.empty == other.empty and
+            self.pawns == other.pawns and
+            self.knights == other.knights and
+            self.bishops == other.bishops and
+            self.rooks == other.rooks and
+            self.queens == other.queens and
+            self.kings == other.kings and
+            self.white == other.white and
+            self.black == other.black;
+    }
+
     pub fn removeOn(self: *Board, sq: Square) void {
         self.pawns.clearBit(sq);
         self.knights.clearBit(sq);
@@ -147,7 +159,6 @@ pub const Board = struct {
                 '/' => {},
                 else => {
                     const pc = try Piece.fromChar(c);
-                    std.debug.print("Setting Board.FromFen {}: {} {} {}\n", .{ c, pc, file, rank });
                     board.setPieceOn(pc, Square{ .file = @intCast(file), .rank = @intCast(rank) });
                     file += 1;
                 },

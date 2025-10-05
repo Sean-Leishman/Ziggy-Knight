@@ -1,6 +1,8 @@
 const std = @import("std");
+const testing = std.testing;
 const board = @import("board.zig");
 const color = @import("color.zig");
+const setup = @import("setup.zig");
 const move = @import("move.zig");
 const bitboard = @import("bitboard.zig");
 const square = @import("square.zig");
@@ -17,6 +19,14 @@ const Square = square.Square;
 const Piece = piece.Piece;
 const PieceType = piece.PieceType;
 
+pub const GameState = struct {
+    castles: Bitboard,
+    en_passant: ?Square,
+    halfmove_clock: u8,
+    fullmove_number: u10,
+    hash: u64,
+};
+
 pub const Game = struct {
     board: Board,
     color: Color,
@@ -28,6 +38,20 @@ pub const Game = struct {
     checkers: Bitboard = Bitboard{ .bits = 0 },
     legalMoves: MoveList = MoveList{},
     hash: u64 = 0,
+
+    pub fn equals(self: Game, other: Game) bool {
+        return self.board.equals(other.board) and self.color == other.color and self.castles == other.castles and self.en_passant == other.en_passant and self.halfmove_clock == other.halfmove_clock and self.fullmove_number == other.fullmove_number and self.hash == other.hash;
+    }
+
+    pub fn saveState(self: *Game) GameState {
+        return GameState{
+            .castles = self.castles,
+            .en_passant = self.en_passant,
+            .halfmove_clock = self.halfmove_clock,
+            .fullmove_number = self.fullmove_number,
+            .hash = self.hash,
+        };
+    }
 
     pub fn us(self: Game) Bitboard {
         return self.board.ofColor(self.color);
@@ -69,11 +93,11 @@ pub const Game = struct {
         return self.isCheckmate() or self.isStalemate();
     }
 
-    pub fn playCheckMove(self: *Game, mv: Move) !void {
+    pub fn playCheckMove(self: *Game, mv: Move) !GameState {
         const legal_mv = self.checkMove(mv) catch |err| {
             return err;
         };
-        self.playMove(legal_mv);
+        return self.playMove(legal_mv);
     }
 
     pub fn checkMove(self: Game, mv: Move) !Move {
@@ -97,13 +121,19 @@ pub const Game = struct {
         return error.IllegalMove;
     }
 
-    pub fn playMove(self: *Game, mv: Move) void {
+    pub fn playMove(self: *Game, mv: Move) GameState {
+        const game_state = self.saveState();
+
+        if (self.en_passant) |old_ep| {
+            self.hash ^= zobrist.EnPassantHash[old_ep.file];
+        }
         self.en_passant = null;
 
+        self.hash ^= zobrist.CastlingHash[self.castles.castleIndex()]; // hash out old castle rights
         self.hash ^= zobrist.TurnHash;
 
         const back = bitboard.relativeRank(self.color, 0);
-        const king_side = (mv.from.toBitboard().bitAnd(bitboard.kingside)).isNotEmpty();
+        const king_side = (mv.to.toBitboard().bitAnd(bitboard.kingside)).isNotEmpty();
         const back_side = back.bitAnd(if (king_side) bitboard.kingside else bitboard.queenside);
         if (mv.mover == PieceType.King) {
             self.castles = self.castles.bitAnd(back.invert());
@@ -125,6 +155,8 @@ pub const Game = struct {
         }
         self.castles.clearBit(mv.from);
         self.castles.clearBit(mv.to); // if we ever move to a castles square, clear it permanently
+        self.hash ^= zobrist.CastlingHash[self.castles.castleIndex()]; // hash in new castle rights
+
         self.removePiece(mv.from);
         self.addPiece(Piece{ .piece_type = mv.mover, .color = self.color }, mv.to);
 
@@ -134,6 +166,8 @@ pub const Game = struct {
         self.color = self.color.invert();
         self.checkers = self.board.checkers(self.color); // calculate new checkers for new player
         self.legalMoves = move_generator.legalMoves(self.*) catch MoveList{};
+
+        return game_state;
     }
 
     fn addPiece(self: *Game, pce: Piece, sq: Square) void {
@@ -143,50 +177,54 @@ pub const Game = struct {
 
     fn removePiece(self: *Game, sq: Square) void {
         const pc = self.board.pieceOn(sq) catch unreachable;
+
+        if (pc == null) {
+            std.debug.print("Board before trying to remove piece:\n{any}\n", .{self.board});
+            std.debug.panic("Trying to remove a piece from an empty square: {s}", .{sq.toString()});
+        }
+
+        std.debug.assert(pc != null);
+        std.debug.assert(pc.?.index() < zobrist.N_PIECES);
+        std.debug.assert(sq.index() < zobrist.N_SQUARES);
+
         self.hash ^= zobrist.ZobristTable[pc.?.index()][sq.index()];
         self.board.removeOn(sq);
     }
 
-    pub fn undoMove(self: *Game, mv: Move) void {
+    pub fn undoMove(self: *Game, mv: Move, state: GameState) !void {
         self.color = self.color.invert();
 
+        const back = bitboard.relativeRank(self.color, 0);
         if (mv.mover == PieceType.King) {
-            self.castles.setBits(mv.from.toBitboard().bitAnd(bitboard.corners)); // set the castle bits
-            self.castles.setBits(mv.to.toBitboard().bitAnd(bitboard.corners)); // for castling rights on corner
             if (mv.special) {
-                self.board.removeOn(mv.to); // removes the king
-                const back = bitboard.relativeRank(self.color, 0);
-                const back_side = back.bitAnd(if (mv.from.file > mv.to.file) bitboard.kingside else bitboard.queenside);
-                const rook = back_side.bitAnd(bitboard.rook_castle).toSquare().?;
-                self.board.removeOn(rook); // removes the rook
-                self.board.setPieceOn(Piece{ .piece_type = PieceType.King, .color = self.color }, mv.from);
-
-                const dest_rook_square = back_side.bitAnd(bitboard.corners).toSquare().?; // place rook on the corner
-                self.board.setPieceOn(Piece{ .piece_type = PieceType.Rook, .color = self.color }, dest_rook_square);
+                const king_side = (mv.to.toBitboard().bitAnd(bitboard.kingside)).isNotEmpty();
+                const back_side = back.bitAnd(if (king_side) bitboard.kingside else bitboard.queenside);
+                self.removePiece(mv.to); // remove the king from the destination square
+                self.removePiece(back_side.bitAnd(bitboard.rook_castle).toSquare().?); // remove the rook from its destination square
+                self.addPiece(Piece{ .piece_type = PieceType.Rook, .color = self.color }, back_side.bitAnd(bitboard.corners).toSquare().?); // place the rook back on its original square
+                self.addPiece(Piece{ .piece_type = PieceType.King, .color = self.color }, mv.from); // place the king back on its original square
             }
         }
         if (mv.special and mv.mover == PieceType.Pawn) { // separating these as if statements improves performance
             if (mv.result == PieceType.Pawn) {
-                self.en_passant = Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.to.file };
-                self.board.setPieceOn(Piece{ .piece_type = PieceType.Pawn, .color = self.color.invert() }, Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.to.file }); // place the captured pawn back on the square
-            } else if (mv.result == PieceType.Empty) {
-                self.en_passant = null;
+                self.addPiece(Piece{ .piece_type = PieceType.Pawn, .color = self.color.invert() }, Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.to.file }); // place the captured pawn back on the square
             }
         }
 
-        // if we undo move to a castle square, we need to set the castle bit
-        const relative_rank: u8 = if (self.color == Color.White) 0 else 7;
-        if (relative_rank == mv.to.rank and (mv.to.file == 0 or mv.to.file == 7)) {
-            self.castles.setBit((Square{ .file = mv.to.file, .rank = mv.to.rank }));
+        if (!(mv.special and mv.mover == PieceType.King)) {
+            self.removePiece(mv.to); // remove the piece from the destination square
+            self.addPiece(Piece{ .piece_type = mv.mover, .color = self.color }, mv.from); // place the piece back on the source square
         }
 
-        self.board.removeOn(mv.to); // remove the piece from the destination square
-        self.board.setPieceOn(Piece{ .piece_type = mv.mover, .color = self.color }, mv.from); // place the piece back on the source square
         if (mv.result != PieceType.Empty and !mv.special) { // if the move was a capture, we need to place the captured piece back on the board
-            self.board.setPieceOn(Piece{ .piece_type = mv.result, .color = self.color.invert() }, mv.to);
+            self.addPiece(Piece{ .piece_type = mv.result, .color = self.color.invert() }, mv.to);
         }
-        // self.halfmove_clock = if (mv.resetsHalfMoveClock()) 0 else self.halfmove_clock - 1;
-        self.fullmove_number -= self.color.wlbr(u10, 0, 1);
+
+        self.castles = state.castles;
+        self.en_passant = state.en_passant;
+        self.halfmove_clock = state.halfmove_clock;
+        self.fullmove_number = state.fullmove_number;
+        self.hash = state.hash;
 
         self.checkers = self.board.checkers(self.color); // calculate new checkers for new player
         self.legalMoves = move_generator.legalMoves(self.*) catch MoveList{};
@@ -239,7 +277,6 @@ pub const Game = struct {
         var file: usize = 0;
         var rank: usize = 7;
 
-        std.debug.print("Board.FromFen: {s}\n", .{board_fen});
         for (board_fen) |c| {
             switch (c) {
                 '1' => file += 1,
@@ -253,7 +290,6 @@ pub const Game = struct {
                 '/' => {},
                 else => {
                     const pc = try Piece.fromChar(c);
-                    std.debug.print("Setting Board.FromFen {}: {} {} {}\n", .{ c, pc, file, rank });
                     self.addPiece(pc, Square{ .file = @intCast(file), .rank = @intCast(rank) });
                     file += 1;
                 },
@@ -288,14 +324,15 @@ pub const Game = struct {
         var castles = bitboard.empty;
         for (castles_fen) |c| {
             switch (c) {
-                'K' => castles.setBits(bitboard.kingside.bitAnd(bitboard.rank(0))),
-                'Q' => castles.setBits(bitboard.queenside.bitAnd(bitboard.rank(0))),
-                'k' => castles.setBits(bitboard.kingside.bitAnd(bitboard.rank(7))),
-                'q' => castles.setBits(bitboard.queenside.bitAnd(bitboard.rank(7))),
+                'K' => castles.setBits(bitboard.rank(0).bitAnd(bitboard.file(7))),
+                'Q' => castles.setBits(bitboard.rank(0).bitAnd(bitboard.file(0))),
+                'k' => castles.setBits(bitboard.rank(7).bitAnd(bitboard.file(7))),
+                'q' => castles.setBits(bitboard.rank(7).bitAnd(bitboard.file(0))),
                 '-' => {}, // do nothing,
                 else => return error.InvalidFen,
             }
         }
+        self.hash ^= zobrist.CastlingHash[castles.castleIndex()];
 
         const en_passant_fen = it.next() orelse return error.InvalidFen;
         var en_passant: ?Square = null;
@@ -326,19 +363,17 @@ pub const Game = struct {
             .en_passant = self.en_passant,
             .halfmove_clock = self.halfmove_clock,
             .fullmove_number = self.fullmove_number,
+            .hash = self.hash,
         };
     }
 };
 
 pub fn standard() Game {
-    return Game{
-        .board = board.standard(),
-        .color = Color.White,
-        .castles = bitboard.corners,
-        .en_passant = null,
-        .halfmove_clock = 0,
-        .fullmove_number = 1,
-    };
+    var gme = empty();
+    gme.setFen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1") catch unreachable;
+    gme.legalMoves = move_generator.legalMoves(gme) catch MoveList{};
+
+    return gme;
 }
 
 pub fn empty() Game {
@@ -350,4 +385,382 @@ pub fn empty() Game {
         .halfmove_clock = 0,
         .fullmove_number = 1,
     };
+}
+
+test "Zobrist FEN round trip hash" {
+    const gme = standard();
+    const fen = try gme.toFen();
+
+    var gme2 = empty();
+    try gme2.setFen(fen);
+    try std.testing.expectEqual(gme.hash, gme2.hash);
+}
+
+test "Game FEN round trip" {
+    var gme = standard();
+    const fen = try gme.toFen();
+
+    std.debug.print("Standard FEN: {s}\n", .{fen});
+
+    var gme2 = empty();
+    try gme2.setFen(fen);
+    const fen2 = try gme2.toFen();
+    std.debug.print("Round trip FEN: {s}\n", .{fen2});
+
+    try std.testing.expectEqualStrings(fen, fen2);
+}
+
+test "zobrist hash changes after move" {
+    setup.init();
+
+    var gm = standard();
+    const initial_hash = gm.hash;
+
+    const mv = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(mv);
+
+    try std.testing.expect(gm.hash != initial_hash);
+}
+test "zobrist hash is reversible with undoMove" {
+    setup.init();
+
+    var gm1 = standard();
+    const initial_hash = gm1.hash;
+
+    var gm2 = gm1.clone();
+
+    try std.testing.expectEqual(initial_hash, gm2.hash);
+
+    // Make moves on gm1
+    const mv1 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const state1 = gm1.playMove(mv1);
+
+    const mv2 = Move{ .from = .{ .file = 4, .rank = 6 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const state2 = gm2.playMove(mv2);
+
+    try std.testing.expect(gm1.hash != gm2.hash);
+
+    try std.testing.expect(gm1.hash != initial_hash);
+    gm1.undoMove(mv1, state1) catch unreachable;
+    try std.testing.expectEqual(initial_hash, gm1.hash);
+
+    try std.testing.expect(gm2.hash != initial_hash);
+    gm2.undoMove(mv2, state2) catch unreachable;
+    try std.testing.expectEqual(initial_hash, gm2.hash);
+}
+
+test "game state is revsersible" {
+    setup.init();
+
+    var gm = standard();
+    const gm_clone = gm.clone();
+
+    // Make a move
+    const mv = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const state = gm.playMove(mv);
+
+    // Undo the move
+    gm.undoMove(mv, state) catch unreachable;
+
+    try std.testing.expectEqualDeep(gm.saveState(), state);
+    try std.testing.expect(gm.equals(gm_clone));
+}
+
+test "game state is reversible with castling move" {
+    setup.init();
+
+    var gm = standard();
+
+    // Make moves to enable castling
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const e4_state = gm.playMove(e4);
+
+    const e5 = Move{ .from = .{ .file = 4, .rank = 6 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const e5_state = gm.playMove(e5);
+
+    const nf3 = Move{ .from = .{ .file = 6, .rank = 0 }, .to = .{ .file = 5, .rank = 2 }, .special = false, .mover = .Knight, .result = .Empty };
+    const nf3_state = gm.playMove(nf3);
+
+    const nc6 = Move{ .from = .{ .file = 1, .rank = 7 }, .to = .{ .file = 2, .rank = 5 }, .special = false, .mover = .Knight, .result = .Empty };
+    const nc6_state = gm.playMove(nc6);
+
+    const bf2 = Move{ .from = .{ .file = 5, .rank = 0 }, .to = .{ .file = 2, .rank = 3 }, .special = false, .mover = .Bishop, .result = .Empty };
+    const bf2_state = gm.playMove(bf2);
+    const bc5 = Move{ .from = .{ .file = 2, .rank = 7 }, .to = .{ .file = 5, .rank = 4 }, .special = false, .mover = .Bishop, .result = .Empty };
+    const bc5_state = gm.playMove(bc5);
+
+    const state_before_castle = gm.saveState();
+
+    // Now castle
+    const o_o_move = Move{ .from = .{ .file = 4, .rank = 0 }, .to = .{ .file = 6, .rank = 0 }, .special = true, .mover = .King, .result = .Empty };
+    const castle_state = gm.playMove(o_o_move);
+
+    // Undo the castling move
+    gm.undoMove(o_o_move, castle_state) catch unreachable;
+    try std.testing.expectEqualDeep(state_before_castle, gm.saveState());
+
+    // Undo all previous moves
+    const moves_to_undo = [_]Move{ bc5, bf2, nc6, nf3, e5, e4 };
+    const states_to_undo = [_]GameState{ bc5_state, bf2_state, nc6_state, nf3_state, e5_state, e4_state };
+    var current_state = gm.saveState();
+    var idx: usize = 0;
+    for (moves_to_undo) |mve| {
+        gm.undoMove(mve, states_to_undo[idx]) catch unreachable;
+        current_state = gm.saveState();
+        try std.testing.expectEqualDeep(current_state, states_to_undo[idx]);
+        idx += 1;
+    }
+}
+
+test "game state is reversible with en passant move" {
+    setup.init();
+
+    var gm = standard();
+
+    // Make moves to enable en passant
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const e4_state = gm.playMove(e4);
+
+    const d5 = Move{ .from = .{ .file = 3, .rank = 6 }, .to = .{ .file = 3, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const d5_state = gm.playMove(d5);
+
+    const e5 = Move{ .from = .{ .file = 4, .rank = 3 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const e5_state = gm.playMove(e5);
+
+    const f5 = Move{ .from = .{ .file = 5, .rank = 6 }, .to = .{ .file = 5, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const f5_state = gm.playMove(f5);
+
+    const state_before_en_passant = gm.saveState();
+
+    // Now perform en passant
+    const exf5 = Move{ .from = .{ .file = 4, .rank = 4 }, .to = .{ .file = 5, .rank = 5 }, .special = true, .mover = .Pawn, .result = .Pawn };
+    const exf5_state = gm.playMove(exf5);
+
+    // Undo the en passant move
+    gm.undoMove(exf5, exf5_state) catch unreachable;
+    try std.testing.expectEqualDeep(state_before_en_passant, gm.saveState());
+
+    // Undo all previous moves
+    const moves_to_undo = [_]Move{ f5, e5, d5, e4 };
+    const states_to_undo = [_]GameState{ f5_state, e5_state, d5_state, e4_state };
+    var current_state = gm.saveState();
+    var idx: usize = 0;
+    for (moves_to_undo) |mve| {
+        gm.undoMove(mve, states_to_undo[idx]) catch unreachable;
+        current_state = gm.saveState();
+        try std.testing.expectEqualDeep(current_state, states_to_undo[idx]);
+        idx += 1;
+    }
+}
+
+test "zobrist hash is reversible with clone" {
+    setup.init();
+
+    var gm1 = standard();
+    const initial_hash = gm1.hash;
+
+    // Clone the game
+    const gm2 = gm1.clone();
+
+    // Make moves on gm1
+    const mv1 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm1.playMove(mv1);
+
+    const mv2 = Move{ .from = .{ .file = 4, .rank = 6 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm1.playMove(mv2);
+
+    // gm2 should still have the initial hash
+    try std.testing.expectEqual(initial_hash, gm2.hash);
+
+    // gm1 should have a different hash
+    try std.testing.expect(gm1.hash != initial_hash);
+}
+
+test "zobrist same position different move order" {
+    setup.init();
+
+    // 1: e4, e5, Nf3, Nc6
+    var gm1 = standard();
+
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm1.playMove(e4);
+
+    const e5 = Move{ .from = .{ .file = 4, .rank = 6 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm1.playMove(e5);
+
+    const nf3 = Move{ .from = .{ .file = 6, .rank = 0 }, .to = .{ .file = 5, .rank = 2 }, .special = false, .mover = .Knight, .result = .Empty };
+    _ = gm1.playMove(nf3);
+
+    const nc6 = Move{ .from = .{ .file = 1, .rank = 7 }, .to = .{ .file = 2, .rank = 5 }, .special = false, .mover = .Knight, .result = .Empty };
+    _ = gm1.playMove(nc6);
+
+    const hash1 = gm1.hash;
+
+    // 2: Nf3, Nc6, e4, e5 (different order, same position)
+    var gm2 = standard();
+    _ = gm2.playMove(nf3);
+    _ = gm2.playMove(nc6);
+    _ = gm2.playMove(e4);
+    _ = gm2.playMove(e5);
+
+    const hash2 = gm2.hash;
+
+    // Same position should have same hash
+    try std.testing.expectEqual(hash1, hash2);
+}
+
+test "zobrist hash unique for different positions" {
+    setup.init();
+
+    var gm1 = standard();
+    var gm2 = standard();
+    var gm3 = standard();
+
+    // Position 1: e4
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm1.playMove(e4);
+
+    // Position 2: d4
+    const d4 = Move{ .from = .{ .file = 3, .rank = 1 }, .to = .{ .file = 3, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm2.playMove(d4);
+
+    // Position 3: Nf3
+    const nf3 = Move{ .from = .{ .file = 6, .rank = 0 }, .to = .{ .file = 5, .rank = 2 }, .special = false, .mover = .Knight, .result = .Empty };
+    _ = gm3.playMove(nf3);
+
+    // All three should have different hashes
+    try std.testing.expect(gm1.hash != gm2.hash);
+    try std.testing.expect(gm1.hash != gm3.hash);
+    try std.testing.expect(gm2.hash != gm3.hash);
+}
+
+test "zobrist hash changes with side to move" {
+    setup.init();
+
+    var gm = standard();
+    const white_hash = gm.hash;
+
+    // After one move, it's black's turn
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(e4);
+
+    // Hash should be different (different side to move)
+    try std.testing.expect(gm.hash != white_hash);
+}
+
+test "zobrist hash with captures" {
+    setup.init();
+
+    var gm = standard();
+
+    // Set up a position with a capture available
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(e4);
+
+    const d5 = Move{ .from = .{ .file = 3, .rank = 6 }, .to = .{ .file = 3, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(d5);
+
+    const hash_before_capture = gm.hash;
+
+    // Capture exd5
+    const exd5 = Move{ .from = .{ .file = 4, .rank = 3 }, .to = .{ .file = 3, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(exd5);
+
+    // Hash should be different after capture
+    try std.testing.expect(gm.hash != hash_before_capture);
+}
+
+test "zobrist hash with en passant" {
+    setup.init();
+
+    var gm = standard();
+
+    // Move white pawn to e4
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(e4);
+
+    // Move black pawn
+    const a6 = Move{ .from = .{ .file = 0, .rank = 6 }, .to = .{ .file = 0, .rank = 5 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(a6);
+
+    // White pawn to e5
+    const e5 = Move{ .from = .{ .file = 4, .rank = 3 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(e5);
+
+    const hash_before_ep = gm.hash;
+
+    // Black pawn d7-d5 (creates en passant opportunity)
+    const d5 = Move{ .from = .{ .file = 3, .rank = 6 }, .to = .{ .file = 3, .rank = 4 }, .special = true, .mover = .Pawn, .result = .Empty };
+    _ = gm.playMove(d5);
+
+    // Hash should be different (en passant square is now available)
+    try std.testing.expect(gm.hash != hash_before_ep);
+    try std.testing.expect(gm.en_passant != null);
+}
+
+test "zobrist hash with castling rights change" {
+    setup.init();
+
+    var gm = standard();
+    const initial_hash = gm.hash;
+
+    // Move white king (loses all white castling rights)
+    const ke2 = Move{ .from = .{ .file = 4, .rank = 0 }, .to = .{ .file = 4, .rank = 1 }, .special = false, .mover = .King, .result = .Empty };
+    _ = gm.playMove(ke2);
+
+    // Hash should change because castling rights changed
+    try std.testing.expect(gm.hash != initial_hash);
+}
+
+test "zobrist hash out and hash in" {
+    setup.init();
+
+    var gm = standard();
+    const initial_hash = gm.hash;
+
+    const castled_out_hash = gm.hash ^ zobrist.CastlingHash[gm.castles.castleIndex()];
+    try std.testing.expect(castled_out_hash != initial_hash);
+
+    const castled_in_hash = castled_out_hash ^ zobrist.CastlingHash[gm.castles.castleIndex()];
+    try std.testing.expectEqual(castled_in_hash, initial_hash);
+}
+
+test "zobrist FEN parsing produces correct hash" {
+    setup.init();
+
+    // Create position via moves
+    var gm1 = standard();
+    const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm1.playMove(e4); // white e4
+
+    var gm1Temp = empty();
+    try gm1Temp.setFen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+    try std.testing.expectEqualStrings(gm1.toFen() catch "", gm1Temp.toFen() catch "");
+    try std.testing.expectEqual(gm1.hash, gm1Temp.hash);
+
+    const e5 = Move{ .from = .{ .file = 4, .rank = 6 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    _ = gm1.playMove(e5); // black e5
+
+    const hash1 = gm1.hash;
+
+    // Create same position via FEN
+    var gm2 = empty();
+    try gm2.setFen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+    const hash2 = gm2.hash;
+
+    // Should have same hash and same Fen
+    try std.testing.expectEqualStrings(gm1.toFen() catch "", gm2.toFen() catch "");
+    try std.testing.expectEqual(hash1, hash2);
+
+    const nf3 = Move{ .from = .{ .file = 6, .rank = 0 }, .to = .{ .file = 5, .rank = 2 }, .special = false, .mover = .Knight, .result = .Empty };
+    _ = gm1.playMove(nf3); // white Nf3
+    const hash3 = gm1.hash;
+    try std.testing.expect(hash3 != hash2);
+    try std.testing.expect(hash3 != hash1);
+
+    var gm3 = empty();
+    try gm3.setFen("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2");
+    const hash4 = gm3.hash;
+    try std.testing.expectEqualStrings(gm1.toFen() catch "", gm3.toFen() catch "");
+    try std.testing.expectEqual(hash3, hash4);
 }

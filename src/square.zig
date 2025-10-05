@@ -5,6 +5,13 @@ pub const Square = packed struct {
     file: u3,
     rank: u3,
 
+    pub fn init(file: u3, rank: u3) Square {
+        return Square{
+            .file = file,
+            .rank = rank,
+        };
+    }
+
     pub fn fromString(s: []const u8) !Square {
         if (s.len != 2) return error.InvalidInput;
         if (s[0] < 'a' or s[0] > 'h') return error.InvalidInput;

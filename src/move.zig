@@ -22,6 +22,21 @@ pub const Move = packed struct {
         return Move{ .from = from, .to = to, .special = special, .mover = mover, .result = result };
     }
 
+    pub fn toString(self: Move) ![]u8 {
+        var result = std.ArrayList(u8).init(std.heap.page_allocator);
+        defer result.deinit();
+
+        const from = self.from.toString();
+        const to = self.to.toString();
+
+        try result.append(from[0]);
+        try result.append(from[1]);
+        try result.append(to[0]);
+        try result.append(to[1]);
+
+        return result.toOwnedSlice();
+    }
+
     pub fn fromRequest(request: MoveRequest) !Move {
         const from = try Square.fromString(request.from);
         const to = try Square.fromString(request.to);

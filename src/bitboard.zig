@@ -31,7 +31,22 @@ pub const Bitboard = packed struct {
                 result[i] = '.';
             }
         }
-        return result;
+        return &result;
+    }
+
+    pub fn castleIndex(self: Bitboard) u4 {
+        // Corners are: a1 (0), h1 (7), a8 (56), h8 (63)
+        // Map to 4 bits: white queenside, white kingside, black queenside, black kingside
+        var index: u4 = 0;
+        if (self.isSet(Square.init(0, 0))) index |= 0b0001; // a1 - white queenside
+        if (self.isSet(Square.init(7, 0))) index |= 0b0010; // h1 - white kingside
+        if (self.isSet(Square.init(0, 7))) index |= 0b0100; // a8 - black queenside
+        if (self.isSet(Square.init(7, 7))) index |= 0b1000; // h8 - black kingside
+        return index;
+    }
+
+    pub fn isSet(self: Bitboard, sq: Square) bool {
+        return ((self.bits >> sq.index()) & 1) != 0;
     }
 
     pub fn eq(self: Bitboard, other: Bitboard) bool {
@@ -192,6 +207,10 @@ pub const files = [_]Bitboard{
 
 pub fn rank(r: u8) Bitboard {
     return ranks[r];
+}
+
+pub fn file(f: u8) Bitboard {
+    return files[f];
 }
 
 pub fn relativeRank(clr: Color, r: u8) Bitboard {
