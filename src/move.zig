@@ -48,7 +48,7 @@ pub const Move = packed struct {
     }
 
     pub fn resetsHalfMoveClock(self: Move) bool {
-        return ((self.special) or (self.mover == PieceType.Pawn) or (self.result != PieceType.Empty));
+        return ((self.result != PieceType.Empty) or (self.mover == PieceType.Pawn));
     }
 
     pub fn isPromotion(self: Move) bool {

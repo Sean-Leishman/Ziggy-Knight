@@ -64,12 +64,15 @@ pub const Searcher = struct {
         std.debug.print("Starting search for color {} at depth {}\n", .{ clr, depth });
 
         self.metrics.time_ms = std.time.milliTimestamp();
-        const best_value = self.alpha_beta(gme, clr, depth, @as(i32, -INF), @as(i32, INF));
+        const best_value = self.alpha_beta(gme, clr, depth, @as(i32, -INF), @as(i32, INF)) catch {
+            std.debug.print("Error during search\n", .{});
+            return -INF;
+        };
         self.metrics.time_ms = std.time.milliTimestamp() - self.metrics.time_ms;
         return best_value;
     }
 
-    pub fn alpha_beta(self: *Searcher, gme: *Game, clr: Color, depth: u32, alpha: i32, beta: i32) i32 {
+    pub fn alpha_beta(self: *Searcher, gme: *Game, clr: Color, depth: u32, alpha: i32, beta: i32) !i32 {
         self.nodes += 1;
         const opp_clr = clr.invert();
 
@@ -101,9 +104,25 @@ pub const Searcher = struct {
         var legal_moves = move_generator.legalMoves(gme.*) catch return -INF;
 
         for (legal_moves.range()) |mve| {
-            const game_state = gme.playMove(mve);
-            const opponent_score = self.alpha_beta(gme, opp_clr, depth - 1, -beta, -alpha_local);
-            gme.undoMove(mve, game_state) catch return -INF;
+            const game_state = gme.playMove(mve) catch |err| {
+                std.debug.print("Error playing move {}: {}\n", .{ mve, err });
+                return error.InvalidMove;
+            };
+
+            const opponent_score = self.alpha_beta(gme, opp_clr, depth - 1, -beta, -alpha_local) catch |err| {
+                std.debug.print("Error in recursive alpha_beta for move {} in fen {!s}: {}\n", .{ mve, gme.toFen(), err });
+                for (legal_moves.range()) |mv| {
+                    std.debug.print("  Legal Move: {}\n", .{mv});
+                }
+
+                _ = gme.undoMove(mve, game_state) catch {};
+                return error.InvalidMove;
+            };
+
+            gme.undoMove(mve, game_state) catch |err| {
+                std.debug.print("Error undoing move {}: {}\n", .{ mve, err });
+                return error.InvalidMove;
+            };
             const our_score = -opponent_score;
 
             if (our_score > best_value) {

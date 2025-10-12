@@ -46,6 +46,16 @@ fn on_request(r: zap.Request) anyerror!void {
 
                 _ = local_gm.playCheckMove(mv) catch |err| {
                     std.debug.print("Error playing move: {}\n", .{err});
+                    var legal_moves = move_generator.legalMoves(local_gm) catch {
+                        std.debug.print("Error generating legal moves: {}\n", .{err});
+                        return err;
+                    };
+
+                    std.debug.print("Legal moves:\n", .{});
+                    for (legal_moves.range()) |mve| {
+                        std.debug.print("  {}\n", .{mve});
+                    }
+
                     return err;
                 };
 
@@ -63,7 +73,11 @@ fn on_request(r: zap.Request) anyerror!void {
                 const score = searcher.search(&local_gm, 5);
                 const best_move = searcher.best_move;
 
-                _ = local_gm.playMove(best_move);
+                _ = local_gm.playMove(best_move) catch |err| {
+                    std.debug.print("Error playing computer move: {}\n", .{err});
+                    return err;
+                };
+
                 const computer_fen = local_gm.toFen() catch |err| {
                     std.debug.print("Error converting to FEN: {}\n", .{err});
                     return err;

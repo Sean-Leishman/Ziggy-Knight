@@ -108,6 +108,7 @@ pub const Game = struct {
 
         for (legalMoves.range()) |legalMove| {
             if (legalMove.from == mv.from and legalMove.to == mv.to) {
+                std.debug.print("Found legal move: {} {}\n", .{ legalMove, mv });
                 return Move{
                     .from = legalMove.from,
                     .to = legalMove.to,
@@ -121,7 +122,7 @@ pub const Game = struct {
         return error.IllegalMove;
     }
 
-    pub fn playMove(self: *Game, mv: Move) GameState {
+    pub fn playMove(self: *Game, mv: Move) !GameState {
         const game_state = self.saveState();
 
         if (self.en_passant) |old_ep| {
@@ -138,15 +139,15 @@ pub const Game = struct {
         if (mv.mover == PieceType.King) {
             self.castles = self.castles.bitAnd(back.invert());
             if (mv.special) {
-                self.removePiece(back_side.bitAnd(bitboard.corners).toSquare().?);
+                self.removePiece(back_side.bitAnd(bitboard.corners).toSquare().?) catch return error.InvalidMove; // remove the rook from its original square
                 const rook = back_side.bitAnd(bitboard.rook_castle).toSquare().?;
-                self.addPiece(Piece{ .piece_type = PieceType.Rook, .color = self.color }, rook);
+                self.addPiece(Piece{ .piece_type = PieceType.Rook, .color = self.color }, rook) catch return error.InvalidMove; // place the rook on its destination square
             }
         }
         if (mv.special and mv.mover == PieceType.Pawn) { // separating these as if statements improves performance
             if (mv.result == PieceType.Pawn) {
                 // en passant capture
-                self.removePiece(Square{ .file = mv.to.file, .rank = mv.from.rank });
+                self.removePiece(Square{ .file = mv.to.file, .rank = mv.from.rank }) catch return error.InvalidMove;
             } else if (mv.result == PieceType.Empty) {
                 // en passant available
                 self.en_passant = Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.from.file };
@@ -157,8 +158,8 @@ pub const Game = struct {
         self.castles.clearBit(mv.to); // if we ever move to a castles square, clear it permanently
         self.hash ^= zobrist.CastlingHash[self.castles.castleIndex()]; // hash in new castle rights
 
-        self.removePiece(mv.from);
-        self.addPiece(Piece{ .piece_type = mv.mover, .color = self.color }, mv.to);
+        self.removePiece(mv.from) catch return error.InvalidMove; // remove the piece from the source square
+        self.addPiece(Piece{ .piece_type = mv.mover, .color = self.color }, mv.to) catch return error.InvalidMove; // place the piece on the destination square
 
         self.halfmove_clock = if (mv.resetsHalfMoveClock()) 0 else self.halfmove_clock + 1;
         self.fullmove_number += self.color.wlbr(u10, 0, 1);
@@ -170,20 +171,17 @@ pub const Game = struct {
         return game_state;
     }
 
-    fn addPiece(self: *Game, pce: Piece, sq: Square) void {
+    fn addPiece(self: *Game, pce: Piece, sq: Square) !void {
         self.board.setPieceOn(pce, sq);
         self.hash ^= zobrist.ZobristTable[pce.index()][sq.index()];
     }
 
-    fn removePiece(self: *Game, sq: Square) void {
-        const pc = self.board.pieceOn(sq) catch unreachable;
-
+    fn removePiece(self: *Game, sq: Square) !void {
+        const pc = self.board.pieceOn(sq) catch return error.InvalidMove;
         if (pc == null) {
-            std.debug.print("Board before trying to remove piece:\n{any}\n", .{self.board});
-            std.debug.panic("Trying to remove a piece from an empty square: {s}", .{sq.toString()});
+            return error.NoPieceOnSquare;
         }
 
-        std.debug.assert(pc != null);
         std.debug.assert(pc.?.index() < zobrist.N_PIECES);
         std.debug.assert(sq.index() < zobrist.N_SQUARES);
 
@@ -199,25 +197,21 @@ pub const Game = struct {
             if (mv.special) {
                 const king_side = (mv.to.toBitboard().bitAnd(bitboard.kingside)).isNotEmpty();
                 const back_side = back.bitAnd(if (king_side) bitboard.kingside else bitboard.queenside);
-                self.removePiece(mv.to); // remove the king from the destination square
-                self.removePiece(back_side.bitAnd(bitboard.rook_castle).toSquare().?); // remove the rook from its destination square
-                self.addPiece(Piece{ .piece_type = PieceType.Rook, .color = self.color }, back_side.bitAnd(bitboard.corners).toSquare().?); // place the rook back on its original square
-                self.addPiece(Piece{ .piece_type = PieceType.King, .color = self.color }, mv.from); // place the king back on its original square
+                self.removePiece(back_side.bitAnd(bitboard.rook_castle).toSquare().?) catch return error.InvalidMove; // remove the rook from its destination square
+                //
+                self.addPiece(Piece{ .piece_type = PieceType.Rook, .color = self.color }, back_side.bitAnd(bitboard.corners).toSquare().?) catch return error.InvalidMove; // place the rook back on its original square
             }
         }
         if (mv.special and mv.mover == PieceType.Pawn) { // separating these as if statements improves performance
             if (mv.result == PieceType.Pawn) {
-                self.addPiece(Piece{ .piece_type = PieceType.Pawn, .color = self.color.invert() }, Square{ .rank = self.color.wlbr(u3, 2, 5), .file = mv.to.file }); // place the captured pawn back on the square
+                self.addPiece(Piece{ .piece_type = PieceType.Pawn, .color = self.color.invert() }, Square{ .rank = self.color.invert().wlbr(u3, 3, 4), .file = mv.to.file }) catch return error.InvalidMove; // place the captured pawn back on the square
             }
         }
 
-        if (!(mv.special and mv.mover == PieceType.King)) {
-            self.removePiece(mv.to); // remove the piece from the destination square
-            self.addPiece(Piece{ .piece_type = mv.mover, .color = self.color }, mv.from); // place the piece back on the source square
-        }
-
+        self.removePiece(mv.to) catch return error.InvalidMove; // remove the piece from the destination square
+        self.addPiece(Piece{ .piece_type = mv.mover, .color = self.color }, mv.from) catch return error.InvalidMove; // place the piece back on the source square
         if (mv.result != PieceType.Empty and !mv.special) { // if the move was a capture, we need to place the captured piece back on the board
-            self.addPiece(Piece{ .piece_type = mv.result, .color = self.color.invert() }, mv.to);
+            self.addPiece(Piece{ .piece_type = mv.result, .color = self.color.invert() }, mv.to) catch return error.InvalidMove;
         }
 
         self.castles = state.castles;
@@ -245,11 +239,11 @@ pub const Game = struct {
             if (self.castles.contains(Square{ .file = 0, .rank = 0 })) {
                 try fen.append('K');
             }
-            if (self.castles.contains(Square{ .file = 0, .rank = 7 })) {
-                try fen.append('k');
-            }
             if (self.castles.contains(Square{ .file = 7, .rank = 0 })) {
                 try fen.append('Q');
+            }
+            if (self.castles.contains(Square{ .file = 0, .rank = 7 })) {
+                try fen.append('k');
             }
             if (self.castles.contains(Square{ .file = 7, .rank = 7 })) {
                 try fen.append('q');
@@ -290,7 +284,7 @@ pub const Game = struct {
                 '/' => {},
                 else => {
                     const pc = try Piece.fromChar(c);
-                    self.addPiece(pc, Square{ .file = @intCast(file), .rank = @intCast(rank) });
+                    self.addPiece(pc, Square{ .file = @intCast(file), .rank = @intCast(rank) }) catch return error.InvalidFen;
                     file += 1;
                 },
             }
@@ -464,6 +458,7 @@ test "game state is revsersible" {
 
     try std.testing.expectEqualDeep(gm.saveState(), state);
     try std.testing.expect(gm.equals(gm_clone));
+    try std.testing.expectEqualStrings(try gm.toFen(), try gm_clone.toFen());
 }
 
 test "game state is reversible with castling move" {
@@ -474,40 +469,53 @@ test "game state is reversible with castling move" {
     // Make moves to enable castling
     const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
     const e4_state = gm.playMove(e4);
+    const e4_fen = try gm.toFen();
 
     const e5 = Move{ .from = .{ .file = 4, .rank = 6 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
     const e5_state = gm.playMove(e5);
+    const e5_fen = try gm.toFen();
 
     const nf3 = Move{ .from = .{ .file = 6, .rank = 0 }, .to = .{ .file = 5, .rank = 2 }, .special = false, .mover = .Knight, .result = .Empty };
     const nf3_state = gm.playMove(nf3);
+    const nf3_fen = try gm.toFen();
 
     const nc6 = Move{ .from = .{ .file = 1, .rank = 7 }, .to = .{ .file = 2, .rank = 5 }, .special = false, .mover = .Knight, .result = .Empty };
     const nc6_state = gm.playMove(nc6);
+    const nc6_fen = try gm.toFen();
 
     const bf2 = Move{ .from = .{ .file = 5, .rank = 0 }, .to = .{ .file = 2, .rank = 3 }, .special = false, .mover = .Bishop, .result = .Empty };
     const bf2_state = gm.playMove(bf2);
-    const bc5 = Move{ .from = .{ .file = 2, .rank = 7 }, .to = .{ .file = 5, .rank = 4 }, .special = false, .mover = .Bishop, .result = .Empty };
+    const bf2_fen = try gm.toFen();
+
+    const bc5 = Move{ .from = .{ .file = 5, .rank = 7 }, .to = .{ .file = 2, .rank = 4 }, .special = false, .mover = .Bishop, .result = .Empty };
     const bc5_state = gm.playMove(bc5);
+    const bc5_fen = try gm.toFen();
 
     const state_before_castle = gm.saveState();
 
     // Now castle
     const o_o_move = Move{ .from = .{ .file = 4, .rank = 0 }, .to = .{ .file = 6, .rank = 0 }, .special = true, .mover = .King, .result = .Empty };
     const castle_state = gm.playMove(o_o_move);
+    try std.testing.expectEqualStrings(try gm.toFen(), "r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQ1RK1 b kq - 5 4");
 
     // Undo the castling move
     gm.undoMove(o_o_move, castle_state) catch unreachable;
     try std.testing.expectEqualDeep(state_before_castle, gm.saveState());
+    try std.testing.expectEqualStrings(try gm.toFen(), bc5_fen);
 
     // Undo all previous moves
     const moves_to_undo = [_]Move{ bc5, bf2, nc6, nf3, e5, e4 };
     const states_to_undo = [_]GameState{ bc5_state, bf2_state, nc6_state, nf3_state, e5_state, e4_state };
+    const fen_states = [_][]const u8{ bc5_fen, bf2_fen, nc6_fen, nf3_fen, e5_fen, e4_fen };
     var current_state = gm.saveState();
+    var current_fen = try gm.toFen();
     var idx: usize = 0;
     for (moves_to_undo) |mve| {
         gm.undoMove(mve, states_to_undo[idx]) catch unreachable;
         current_state = gm.saveState();
         try std.testing.expectEqualDeep(current_state, states_to_undo[idx]);
+        try std.testing.expectEqualStrings(current_fen, fen_states[idx]);
+        current_fen = try gm.toFen();
         idx += 1;
     }
 }
@@ -520,35 +528,45 @@ test "game state is reversible with en passant move" {
     // Make moves to enable en passant
     const e4 = Move{ .from = .{ .file = 4, .rank = 1 }, .to = .{ .file = 4, .rank = 3 }, .special = false, .mover = .Pawn, .result = .Empty };
     const e4_state = gm.playMove(e4);
+    const e4_fen = try gm.toFen();
 
     const d5 = Move{ .from = .{ .file = 3, .rank = 6 }, .to = .{ .file = 3, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
     const d5_state = gm.playMove(d5);
+    const d5_fen = try gm.toFen();
 
     const e5 = Move{ .from = .{ .file = 4, .rank = 3 }, .to = .{ .file = 4, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
     const e5_state = gm.playMove(e5);
+    const e5_fen = try gm.toFen();
 
-    const f5 = Move{ .from = .{ .file = 5, .rank = 6 }, .to = .{ .file = 5, .rank = 4 }, .special = false, .mover = .Pawn, .result = .Empty };
+    const f5 = Move{ .from = .{ .file = 5, .rank = 6 }, .to = .{ .file = 5, .rank = 4 }, .special = true, .mover = .Pawn, .result = .Empty };
     const f5_state = gm.playMove(f5);
+    const f5_fen = try gm.toFen();
 
     const state_before_en_passant = gm.saveState();
 
     // Now perform en passant
     const exf5 = Move{ .from = .{ .file = 4, .rank = 4 }, .to = .{ .file = 5, .rank = 5 }, .special = true, .mover = .Pawn, .result = .Pawn };
     const exf5_state = gm.playMove(exf5);
+    try std.testing.expectEqualStrings(try gm.toFen(), "rnbqkbnr/ppp1p1pp/5P2/3p4/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 3");
 
     // Undo the en passant move
     gm.undoMove(exf5, exf5_state) catch unreachable;
     try std.testing.expectEqualDeep(state_before_en_passant, gm.saveState());
+    try std.testing.expectEqualStrings(try gm.toFen(), f5_fen);
 
     // Undo all previous moves
     const moves_to_undo = [_]Move{ f5, e5, d5, e4 };
     const states_to_undo = [_]GameState{ f5_state, e5_state, d5_state, e4_state };
+    const fen_states = [_][]const u8{ f5_fen, e5_fen, d5_fen, e4_fen };
     var current_state = gm.saveState();
+    var current_fen = try gm.toFen();
     var idx: usize = 0;
     for (moves_to_undo) |mve| {
         gm.undoMove(mve, states_to_undo[idx]) catch unreachable;
         current_state = gm.saveState();
         try std.testing.expectEqualDeep(current_state, states_to_undo[idx]);
+        try std.testing.expectEqualStrings(current_fen, fen_states[idx]);
+        current_fen = try gm.toFen();
         idx += 1;
     }
 }
